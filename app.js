@@ -9,9 +9,13 @@ function setStatus(msg, isError = false) {
   el.style.color = isError ? '#d94747' : '#1f9d73';
 }
 
+// Persist the generated app and its versions, but never restore transient prompt
+// text into the next app-creation session. This prevents a previous request from
+// silently becoming part of the next prompt.
 function save() {
   try {
-    localStorage.setItem(KEY, JSON.stringify(state));
+    const persisted = { ...state, request: '', prompt: '' };
+    localStorage.setItem(KEY, JSON.stringify(persisted));
   } catch {
     setStatus('저장에 실패했습니다.', true);
   }
@@ -24,8 +28,12 @@ function load() {
     const saved = JSON.parse(raw);
     Object.assign(state, saved);
   } catch {
-    // ignore
+    // Ignore invalid local data and start with a clean state.
   }
+  // Older versions saved the last request and prompt. Deliberately discard them.
+  state.request = '';
+  state.prompt = '';
+  state.pendingType = 'create';
 }
 
 function inferType(text) {
@@ -37,25 +45,29 @@ function inferType(text) {
 }
 
 function buildPrompt(text, mode = 'create') {
-  const clean = text.trim();
+  const clean = String(text || '').trim();
   if (!clean) return '내용을 입력해 주세요.';
 
   if (mode === 'change') {
     return [
-      '수정 요청',
-      `- 변경 내용: ${clean}`,
-      '- 조건: 기존 구조를 유지하고 필요한 부분만 경미하게 수정',
+      '현재 사용자가 입력한 수정 요청만 반영하세요. 이전 요청이나 다른 대화 내용은 포함하지 마세요.',
+      '[이번 수정 요청 시작]',
+      clean,
+      '[이번 수정 요청 끝]',
+      '- 조건: 기존 구조를 유지하고 필요한 부분만 수정',
       '- 결과: 화면이 단순하고 직관적으로 보이도록 정리',
       '- 보존: 핵심 기능과 기존 흐름 유지'
     ].join('\n');
   }
 
   return [
-    '앱 생성 요청',
-    `- 설명: ${clean}`,
+    '새 앱을 개발합니다. 다른 대화, 과거 요청 또는 저장된 내용을 앱 요구사항으로 사용하지 마세요.',
+    '[이번 앱 설명 시작]',
+    clean,
+    '[이번 앱 설명 끝]',
     '- 조건: 화면은 단순하고 직관적이어야 함',
-    '- 기능: 핵심 기능 우선, 불필요한 설명 제거',
-    '- 결과: 바로 이해할 수 있는 최소형 UI'
+    '- 기능: 위 설명에 포함된 핵심 기능을 구현',
+    '- 결과: 위 설명에 맞는 앱을 제작하고 불필요한 주제나 콘텐츠를 추가하지 않음'
   ].join('\n');
 }
 
@@ -177,6 +189,7 @@ function switchTab(tabName) {
 }
 
 function generateFromInput() {
+  // Read only the current visible input. No persisted request or old prompt is reused.
   const raw = $('#request').value.trim();
   if (!raw) {
     setStatus('앱 내용을 입력해 주세요.', true);
@@ -188,7 +201,7 @@ function generateFromInput() {
   state.pendingType = 'create';
   renderPrompt();
   $('#approve').disabled = false;
-  setStatus('프롬프트를 검토하고 승인해 주세요.');
+  setStatus('이번 입력만 포함한 프롬프트를 검토하고 승인해 주세요.');
   save();
 }
 
@@ -228,6 +241,9 @@ function applyApprovedPrompt() {
   $('#approve').disabled = true;
   setStatus('적용되었습니다. 미리보기를 확인하세요.');
   renderApp();
+  state.request = '';
+  state.prompt = '';
+  $('#request').value = '';
   save();
   switchTab('preview');
   $('#confirm-dialog').close();
@@ -249,7 +265,7 @@ function submitModifyRequest() {
   state.pendingType = 'change';
   renderPrompt();
   $('#approve').disabled = false;
-  setStatus('수정 프롬프트가 준비되었습니다.');
+  setStatus('이번 수정 요청만 포함한 프롬프트가 준비되었습니다.');
   switchTab('create');
   save();
 }
@@ -318,13 +334,11 @@ tabs.forEach((tab) => {
 });
 
 load();
-if (state.request) {
-  $('#request').value = state.request;
-}
-if (state.prompt) {
-  renderPrompt();
-  $('#approve').disabled = false;
-}
+// Always start with a blank request and prompt, even if an older app version
+// left them in localStorage. The user must explicitly enter each new request.
+$('#request').value = '';
+renderPrompt();
+$('#approve').disabled = true;
 if (state.app) {
   renderApp();
 }
