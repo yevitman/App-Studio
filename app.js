@@ -1,346 +1,160 @@
 const KEY = 'app-studio-v1';
-const $ = (sel) => document.querySelector(sel);
+const ENDPOINT_KEY = 'app-studio-ai-endpoint-v1';
+const TOKEN_KEY = 'app-studio-ai-token-v1';
+const $ = (selector) => document.querySelector(selector);
 const state = { request: '', prompt: '', app: null, versions: [], image: '', pendingType: 'create' };
 const tabs = [...document.querySelectorAll('.nav-btn')];
 
-function setStatus(msg, isError = false) {
-  const el = $('#status');
-  el.textContent = msg;
-  el.style.color = isError ? '#d94747' : '#1f9d73';
+function setStatus(message, isError = false) {
+  const el = $('#status'); el.textContent = message; el.style.color = isError ? '#d94747' : '#1f9d73';
 }
-
-// Persist the generated app and its versions, but never restore transient prompt
-// text into the next app-creation session. This prevents a previous request from
-// silently becoming part of the next prompt.
 function save() {
-  try {
-    const persisted = { ...state, request: '', prompt: '' };
-    localStorage.setItem(KEY, JSON.stringify(persisted));
-  } catch {
-    setStatus('저장에 실패했습니다.', true);
-  }
+  try { localStorage.setItem(KEY, JSON.stringify({ ...state, request: '', prompt: '' })); }
+  catch { setStatus('저장에 실패했습니다.', true); }
 }
-
 function load() {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return;
-    const saved = JSON.parse(raw);
-    Object.assign(state, saved);
-  } catch {
-    // Ignore invalid local data and start with a clean state.
-  }
-  // Older versions saved the last request and prompt. Deliberately discard them.
-  state.request = '';
-  state.prompt = '';
-  state.pendingType = 'create';
+  try { const saved = JSON.parse(localStorage.getItem(KEY) || '{}'); Object.assign(state, saved); }
+  catch { /* start clean */ }
+  // Old prompt/request values must never become a new app's requirements.
+  state.request = ''; state.prompt = ''; state.pendingType = 'create';
 }
-
-function inferType(text) {
-  const t = text.toLowerCase();
-  if (/(할 일|todo|task|업무|일정)/.test(t)) return 'todo';
-  if (/(쇼핑|상품|스토어|장바구니|구매|오더)/.test(t)) return 'shop';
-  if (/(대시보드|통계|분석|차트|매출)/.test(t)) return 'dashboard';
-  return 'general';
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, (char) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
 }
-
 function buildPrompt(text, mode = 'create') {
   const clean = String(text || '').trim();
-  if (!clean) return '내용을 입력해 주세요.';
-
-  if (mode === 'change') {
-    return [
-      '현재 사용자가 입력한 수정 요청만 반영하세요. 이전 요청이나 다른 대화 내용은 포함하지 마세요.',
-      '[이번 수정 요청 시작]',
-      clean,
-      '[이번 수정 요청 끝]',
-      '- 조건: 기존 구조를 유지하고 필요한 부분만 수정',
-      '- 결과: 화면이 단순하고 직관적으로 보이도록 정리',
-      '- 보존: 핵심 기능과 기존 흐름 유지'
-    ].join('\n');
-  }
-
+  if (!clean) return '';
+  if (mode === 'change') return [
+    '기존 앱을 이번 수정 요청에 맞게 변경하세요. 요청하지 않은 기능은 보존하고, 이전 대화나 다른 주제를 반영하지 마세요.',
+    '[이번 수정 요청 시작]', clean, '[이번 수정 요청 끝]',
+    '수정된 완전한 단일 HTML 문서만 출력하세요. 코드 펜스나 설명은 넣지 마세요.'
+  ].join('\n');
   return [
-    '새 앱을 개발합니다. 다른 대화, 과거 요청 또는 저장된 내용을 앱 요구사항으로 사용하지 마세요.',
-    '[이번 앱 설명 시작]',
-    clean,
-    '[이번 앱 설명 끝]',
-    '- 조건: 화면은 단순하고 직관적이어야 함',
-    '- 기능: 위 설명에 포함된 핵심 기능을 구현',
-    '- 결과: 위 설명에 맞는 앱을 제작하고 불필요한 주제나 콘텐츠를 추가하지 않음'
+    '새 앱을 개발하세요. 오직 아래 이번 앱 설명만 요구사항으로 사용하세요. 이전 대화, 과거 요청 또는 저장된 내용을 가져오지 마세요.',
+    '[이번 앱 설명 시작]', clean, '[이번 앱 설명 끝]',
+    '요구사항을 다른 주제로 바꾸거나 원고를 답변으로 다시 작성하지 마세요.',
+    '스마트폰에 최적화된 완전한 단일 HTML 앱을 작성하고, 코드 펜스나 설명 없이 <!doctype html>부터 </html>까지 출력하세요.'
   ].join('\n');
 }
-
 function renderPrompt() {
-  const text = state.prompt || '';
   const el = $('#prompt');
-  if (!text) {
-    el.textContent = '생성된 프롬프트가 여기에 표시됩니다.';
-    el.classList.add('empty');
-    return;
-  }
-  el.textContent = text;
-  el.classList.remove('empty');
+  if (!state.prompt) { el.textContent = '현재 입력한 앱 설명으로 프롬프트를 만듭니다.'; el.classList.add('empty'); return; }
+  el.textContent = state.prompt; el.classList.remove('empty');
 }
-
 function renderApp() {
   const root = $('#app-preview');
-  if (!state.app) {
-    root.innerHTML = '<div class="empty-preview">앱 미리보기가 여기에 표시됩니다.</div>';
-    return;
-  }
-
-  const { title, description, type } = state.app;
-  let body = '';
-
-  if (type === 'todo') {
-    body = `
-      <div class="sample-list">
-        <p>☐ 작업 1</p>
-        <p>☐ 작업 2</p>
-        <p>✓ 완료</p>
-      </div>
-    `;
-  } else if (type === 'shop') {
-    body = `
-      <div class="sample-grid">
-        <p>🛍 상품 A · ₩28,000</p>
-        <p>✨ 상품 B · ₩35,000</p>
-      </div>
-    `;
-  } else if (type === 'dashboard') {
-    body = `
-      <div class="sample-grid">
-        <p>방문 128</p>
-        <p>전환 84%</p>
-        <p>매출 5.4K</p>
-      </div>
-    `;
-  } else {
-    body = `
-      <div class="sample-list">
-        <p>✦ 메인 액션</p>
-        <p>✓ 단순 구성</p>
-        <p>◎ 빠른 사용</p>
-      </div>
-    `;
-  }
-
-  root.innerHTML = `
-    <article class="sample-app">
-      <div class="sample-head">
-        <strong>${title}</strong>
-        <span>Live</span>
-      </div>
-      <p>${description}</p>
-      ${body}
-    </article>
-  `;
+  if (!state.app?.html) { root.innerHTML = '<div class="empty-preview">AI로 앱을 생성하면 여기에 표시됩니다.</div>'; return; }
+  root.innerHTML = '';
+  const frame = document.createElement('iframe');
+  frame.title = state.app.title || '생성된 앱 미리보기';
+  frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals');
+  frame.srcdoc = state.app.html;
+  root.appendChild(frame);
 }
-
 function backupVersion() {
   if (!state.app) return;
-  state.versions.unshift({
-    app: JSON.parse(JSON.stringify(state.app)),
-    time: new Date().toLocaleString('ko-KR')
-  });
-  state.versions = state.versions.slice(0, 10);
-  renderVersions();
+  state.versions.unshift({ app: JSON.parse(JSON.stringify(state.app)), time: new Date().toLocaleString('ko-KR') });
+  state.versions = state.versions.slice(0, 20); renderVersions();
 }
-
 function renderVersions() {
   const list = $('#version-list');
-  if (!state.versions.length) {
-    list.innerHTML = '<div class="empty-version">저장된 버전이 없습니다.</div>';
-    return;
-  }
-
-  list.innerHTML = state.versions.map((item, index) => `
-    <div class="version-item">
-      <div>
-        <div class="version-label"><span class="version-tag">${index === 0 ? '최근' : '백업'}</span>${item.app.title}</div>
-        <div class="version-time">${item.time}</div>
-      </div>
-      <button class="btn ghost" data-restore="${index}">복원</button>
-    </div>
-  `).join('');
-
-  list.querySelectorAll('[data-restore]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const idx = Number(btn.dataset.restore);
-      const target = state.versions[idx];
-      if (!target) return;
-      state.app = JSON.parse(JSON.stringify(target.app));
-      renderApp();
-      setStatus('버전을 복원했습니다.');
-      switchTab('preview');
-      save();
-    });
-  });
+  if (!state.versions.length) { list.innerHTML = '<div class="empty-version">저장된 버전이 없습니다.</div>'; return; }
+  list.innerHTML = state.versions.map((item, index) => `<div class="version-item"><div><div class="version-label"><span class="version-tag">${index === 0 ? '최근' : '백업'}</span>${escapeHtml(item.app.title)}</div><div class="version-time">${escapeHtml(item.time)}</div></div><button class="btn ghost" data-restore="${index}">복원</button></div>`).join('');
+  list.querySelectorAll('[data-restore]').forEach((button) => button.addEventListener('click', () => {
+    const item = state.versions[Number(button.dataset.restore)]; if (!item) return;
+    if (state.app) backupVersion();
+    state.app = JSON.parse(JSON.stringify(item.app)); renderApp(); setStatus('버전을 복원했습니다.'); switchTab('preview'); save();
+  }));
 }
-
-function switchTab(tabName) {
-  tabs.forEach((tab) => {
-    tab.classList.toggle('active', tab.dataset.panel === tabName);
-  });
-  document.querySelectorAll('.panel').forEach((panel) => {
-    panel.classList.toggle('active', panel.id === tabName);
-  });
+function switchTab(name) {
+  tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.panel === name));
+  document.querySelectorAll('.panel').forEach((panel) => panel.classList.toggle('active', panel.id === name));
 }
-
-function generateFromInput() {
-  // Read only the current visible input. No persisted request or old prompt is reused.
+function makePromptFromCurrentInput() {
   const raw = $('#request').value.trim();
-  if (!raw) {
-    setStatus('앱 내용을 입력해 주세요.', true);
-    return;
-  }
-
-  state.request = raw;
-  state.prompt = buildPrompt(raw, 'create');
-  state.pendingType = 'create';
-  renderPrompt();
-  $('#approve').disabled = false;
-  setStatus('이번 입력만 포함한 프롬프트를 검토하고 승인해 주세요.');
-  save();
+  if (!raw) { setStatus('이번 앱 설명을 입력해 주세요.', true); return; }
+  state.request = raw; state.prompt = buildPrompt(raw, 'create'); state.pendingType = 'create';
+  renderPrompt(); $('#approve').disabled = false;
+  setStatus('현재 입력한 설명만 프롬프트에 포함했습니다. AI 앱 생성을 누르세요.');
 }
-
-function showApproveDialog() {
-  if (!state.prompt) return;
-  $('#dialog-prompt').textContent = state.prompt;
-  $('#confirm-dialog').showModal();
+function openSettings() {
+  $('#endpoint').value = localStorage.getItem(ENDPOINT_KEY) || '';
+  $('#access-token').value = sessionStorage.getItem(TOKEN_KEY) || '';
+  $('#settings-dialog').showModal();
 }
-
-function applyApprovedPrompt() {
-  const raw = (state.request || $('#request').value).trim();
-  if (!raw) {
-    setStatus('입력값이 비어 있습니다.', true);
-    return;
-  }
-
-  if (!state.app) {
-    backupVersion();
-  }
-
-  if (state.pendingType === 'change' && state.app) {
-    state.app.description = raw;
-    state.app.type = inferType(raw);
-    const nextTitle = raw.length > 20 ? `${raw.slice(0, 20)}…` : raw;
-    state.app.title = nextTitle;
-  } else {
-    state.app = {
-      title: raw.length > 20 ? `${raw.slice(0, 20)}…` : raw,
-      description: raw,
-      type: inferType(raw)
-    };
-    backupVersion();
-  }
-
-  $('#prompt').textContent = '승인된 프롬프트가 적용되었습니다.';
-  $('#prompt').classList.add('empty');
-  $('#approve').disabled = true;
-  setStatus('적용되었습니다. 미리보기를 확인하세요.');
-  renderApp();
-  state.request = '';
-  state.prompt = '';
-  $('#request').value = '';
-  save();
-  switchTab('preview');
-  $('#confirm-dialog').close();
+function saveSettings() {
+  const endpoint = $('#endpoint').value.trim(); const token = $('#access-token').value.trim();
+  try { const parsed = new URL(endpoint); if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error(); }
+  catch { setStatus('Vercel AI 서버 주소를 확인해 주세요.', true); return; }
+  if (!token) { setStatus('서버 접근 토큰을 입력해 주세요.', true); return; }
+  localStorage.setItem(ENDPOINT_KEY, endpoint); sessionStorage.setItem(TOKEN_KEY, token);
+  $('#settings-dialog').close(); setStatus('AI 서버 설정을 저장했습니다.');
 }
-
+function extractHtml(result) {
+  let html = String(result || '').trim();
+  const fenced = html.match(/```(?:html)?\s*([\s\S]*?)```/i); if (fenced) html = fenced[1].trim();
+  const start = html.search(/<!doctype\s+html|<html\b/i); if (start > 0) html = html.slice(start);
+  return html;
+}
+async function callAI(mode, request) {
+  const endpoint = localStorage.getItem(ENDPOINT_KEY); const token = sessionStorage.getItem(TOKEN_KEY);
+  if (!endpoint || !token) { setStatus('먼저 AI 연결 설정에서 배포된 서버 주소와 접근 토큰을 입력하세요.', true); openSettings(); return; }
+  const prompt = mode === 'create' ? buildPrompt(request, 'create') : [
+    '기존 앱의 코드를 참고하여 사용자의 수정 요청만 반영하세요. 보존할 기존 기능은 유지하고, 다른 대화 내용은 사용하지 마세요.',
+    '[이번 수정 요청]', request, '[/이번 수정 요청]',
+    '수정된 전체 HTML 문서만 출력합니다.', '[현재 앱 HTML]', state.app?.html || ''
+  ].join('\n');
+  document.body.classList.add('is-loading'); setStatus('AI가 작업 중입니다. 잠시 기다려 주세요.');
+  try {
+    const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ mode, request, html: mode === 'edit' ? state.app?.html : '', prompt }) });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `서버 요청 실패 (${response.status})`);
+    const html = extractHtml(data.html || data.output || data.code);
+    if (!/<(?:!doctype\s+html|html|body)\b/i.test(html)) throw new Error('AI 응답에 전체 HTML이 없습니다. 다시 요청해 주세요.');
+    if (state.app) backupVersion();
+    const title = mode === 'create' ? (request.length > 32 ? `${request.slice(0, 32)}…` : request) : state.app.title;
+    state.app = { title, html, description: request, updated: new Date().toISOString() };
+    state.request = ''; state.prompt = ''; state.pendingType = 'create';
+    $('#request').value = ''; $('#change').value = ''; renderPrompt(); $('#approve').disabled = true;
+    renderApp(); renderVersions(); save(); switchTab('preview'); setStatus(mode === 'create' ? '앱을 생성하고 저장했습니다.' : '수정 내용을 적용하고 새 버전으로 저장했습니다.');
+  } catch (error) { setStatus(error.message || 'AI 연결에 실패했습니다.', true); }
+  finally { document.body.classList.remove('is-loading'); }
+}
+function confirmGenerate() {
+  if (!state.prompt || !state.request) { setStatus('앱 설명을 다시 입력하고 프롬프트를 만드세요.', true); return; }
+  $('#dialog-prompt').textContent = state.prompt; $('#confirm-dialog').showModal();
+}
+function approvePrompt() {
+  const request = state.request; $('#confirm-dialog').close(); callAI('create', request);
+}
 function submitModifyRequest() {
   const text = $('#change').value.trim();
-  const imageAttached = !!$('#attachment').querySelector('img');
-
-  if (!text && !imageAttached) {
-    setStatus('수정 내용 또는 이미지를 추가해 주세요.', true);
-    return;
-  }
-
-  const requestText = text || '첨부 이미지를 참고해 화면을 정리하고 개선합니다.';
-  $('#request').value = requestText;
-  state.request = requestText;
-  state.prompt = buildPrompt(requestText, 'change');
-  state.pendingType = 'change';
-  renderPrompt();
-  $('#approve').disabled = false;
-  setStatus('이번 수정 요청만 포함한 프롬프트가 준비되었습니다.');
-  switchTab('create');
-  save();
+  if (!text) { setStatus('수정할 내용을 입력하세요.', true); return; }
+  if (!state.app?.html) { setStatus('먼저 AI 앱을 생성하거나 HTML 앱을 불러오세요.', true); return; }
+  callAI('edit', text);
 }
-
-function clearModify() {
-  $('#change').value = '';
-  $('#image').value = '';
-  $('#attachment').innerHTML = '';
-  $('#attachment').classList.add('hidden');
-  setStatus('수정 입력을 초기화했습니다.');
-}
-
+function clearModify() { $('#change').value = ''; $('#image').value = ''; $('#attachment').innerHTML = ''; $('#attachment').classList.add('hidden'); setStatus('수정 입력을 초기화했습니다.'); }
 function handleImage(file) {
-  if (!file) return;
-  if (file.size > 5 * 1024 * 1024) {
-    setStatus('이미지는 5MB 이하만 첨부할 수 있습니다.', true);
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = () => {
-    const data = String(reader.result || '');
-    $('#attachment').innerHTML = `<img src="${data}" alt="첨부 이미지">`;
-    $('#attachment').classList.remove('hidden');
-    state.image = data;
-    save();
-  };
-  reader.readAsDataURL(file);
+  if (!file) return; if (file.size > 5 * 1024 * 1024) { setStatus('이미지는 5MB 이하만 첨부할 수 있습니다.', true); return; }
+  const reader = new FileReader(); reader.onload = () => { const data = String(reader.result || ''); $('#attachment').innerHTML = `<img src="${data}" alt="첨부 이미지">`; $('#attachment').classList.remove('hidden'); state.image = data; save(); }; reader.readAsDataURL(file);
 }
-
 async function capturePreview() {
-  if (!window.html2canvas) {
-    setStatus('캡처 모듈이 준비되지 않았습니다.', true);
-    return;
-  }
-
-  try {
-    const canvas = await html2canvas($('#app-preview'));
-    const data = canvas.toDataURL('image/png');
-    $('#attachment').innerHTML = `<img src="${data}" alt="캡처 이미지">`;
-    $('#attachment').classList.remove('hidden');
-    state.image = data;
-    setStatus('현재 화면을 캡처했습니다.');
-    save();
-  } catch {
-    setStatus('캡처에 실패했습니다.', true);
-  }
+  if (!window.html2canvas) { setStatus('캡처 모듈이 준비되지 않았습니다.', true); return; }
+  try { const data = await html2canvas($('#app-preview')).then((canvas) => canvas.toDataURL('image/png')); $('#attachment').innerHTML = `<img src="${data}" alt="캡처 이미지">`; $('#attachment').classList.remove('hidden'); state.image = data; setStatus('현재 화면을 캡처했습니다.'); save(); }
+  catch { setStatus('캡처에 실패했습니다.', true); }
 }
-
-$('#make-prompt').addEventListener('click', generateFromInput);
-$('#approve').addEventListener('click', showApproveDialog);
-$('#confirm').addEventListener('click', applyApprovedPrompt);
+$('#make-prompt').addEventListener('click', makePromptFromCurrentInput);
+$('#approve').addEventListener('click', confirmGenerate);
+$('#confirm').addEventListener('click', approvePrompt);
 $('#cancel').addEventListener('click', () => $('#confirm-dialog').close());
 $('#send-change').addEventListener('click', submitModifyRequest);
 $('#clear').addEventListener('click', clearModify);
 $('#capture').addEventListener('click', capturePreview);
 $('#image').addEventListener('change', (event) => handleImage(event.target.files?.[0]));
-$('#request').addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
-    generateFromInput();
-  }
-});
-
-tabs.forEach((tab) => {
-  tab.addEventListener('click', () => switchTab(tab.dataset.panel));
-});
-
-load();
-// Always start with a blank request and prompt, even if an older app version
-// left them in localStorage. The user must explicitly enter each new request.
-$('#request').value = '';
-renderPrompt();
-$('#approve').disabled = true;
-if (state.app) {
-  renderApp();
-}
-renderVersions();
-switchTab('create');
+$('#open-settings').addEventListener('click', openSettings);
+$('#close-settings').addEventListener('click', () => $('#settings-dialog').close());
+$('#save-settings').addEventListener('click', saveSettings);
+$('#request').addEventListener('input', () => { state.request = ''; state.prompt = ''; $('#approve').disabled = true; renderPrompt(); });
+$('#request').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); makePromptFromCurrentInput(); } });
+tabs.forEach((tab) => tab.addEventListener('click', () => switchTab(tab.dataset.panel)));
+load(); $('#request').value = ''; renderPrompt(); $('#approve').disabled = true; if (state.app) renderApp(); renderVersions();
